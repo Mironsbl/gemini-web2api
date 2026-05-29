@@ -89,19 +89,9 @@ def messages_to_prompt(messages: list, tools: list = None, tool_choice=None) -> 
                 if c.get("type") in ("text", "input_text"):
                     text_parts.append(c.get("text", ""))
                 elif c.get("type") == "image_url":
-                    url = c.get("image_url", {}).get("url", "")
-                    if url.startswith("data:"):
-                        header, b64 = url.split(",", 1) if "," in url else ("", "")
-                        b64 = _compress_b64_if_needed(b64)
-                        text_parts.append(f"\n[Image (base64 PNG)]:\ndata:image/png;base64,{b64}\n")
-                    else:
-                        images.append((url, None))
+                    text_parts.append("[Note: Image input not supported in this API. Please describe the image in text.]")
                 elif c.get("type") == "image":
-                    src = c.get("source", {})
-                    if src.get("type") == "base64":
-                        mime = src.get("media_type", "image/png")
-                        b64 = _compress_b64_if_needed(src['data'])
-                        text_parts.append(f"\n[Image (base64)]:\ndata:{mime};base64,{b64}\n")
+                    text_parts.append("[Note: Image input not supported in this API. Please describe the image in text.]")
             content = " ".join(text_parts)
 
         if role == "system":
