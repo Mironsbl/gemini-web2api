@@ -133,6 +133,16 @@ EOF
 
 chmod +x ~/.local/bin/gemini-cli
 
+# Создание исполняемого лаунчера gemini-official для запуска оригинального CLI
+echo -e "${YELLOW}[*] Создание исполняемого файла в ~/.local/bin/gemini-official...${NC}"
+cat << EOF > ~/.local/bin/gemini-official
+#!/bin/bash
+export GOOGLE_GEMINI_BASE_URL="http://localhost:8081"
+export GEMINI_API_KEY="sk-test-key"
+exec npx -y @google/gemini-cli "\$@"
+EOF
+chmod +x ~/.local/bin/gemini-official
+
 # 7. Проверка PATH
 echo -e "${GREEN}[*] Установка завершена успешно!${NC}"
 if [[ ":$PATH:" != *":$HOME/.local/bin:"* ]]; then
@@ -140,5 +150,6 @@ if [[ ":$PATH:" != *":$HOME/.local/bin:"* ]]; then
     echo -e "Добавьте следующую строку в ваш ~/.zshrc (или ~/.bash_profile):"
     echo -e "  ${GREEN}export PATH=\"\$HOME/.local/bin:\$PATH\"${NC}"
 else
-    echo -e "Вы можете запустить клиент из любой папки командой: ${GREEN}gemini-cli${NC}"
+    echo -e "Интерактивный CLI:   ${GREEN}gemini-cli${NC}"
+    echo -e "Официальный CLI:     ${GREEN}gemini-official${NC}"
 fi
