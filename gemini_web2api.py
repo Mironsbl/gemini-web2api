@@ -1357,33 +1357,14 @@ def messages_to_prompt(messages: list, tools: list = None) -> tuple:
     """Convert OpenAI messages to (prompt_str, images_list)."""
     parts = []
     images = []
+    
+    # 1. ALWAYS add the global system prompt if it exists (combine/prepend it)
     global_sys = CONFIG.get("system_prompt")
-    has_system_msg = any(msg.get("role") == "system" for msg in messages)
-    if global_sys and not has_system_msg:
-        is_novelist = "ENI" in global_sys or "novelistic" in global_sys or "Limerence" in global_sys
-        if not tools or not is_novelist:
-            parts.append(f"[System instruction]: {global_sys}")
-    if tools:
-        tool_defs = []
-        for tool in tools:
-            fn = tool.get("function", tool) if tool.get("type") == "function" else tool
-            tool_defs.append({
-                "name": fn.get("name", tool.get("name", "")),
-                "description": fn.get("description", tool.get("description", "")),
-                "parameters": fn.get("parameters", tool.get("parameters", {})),
-            })
-        if tool_defs:
-            parts.append(
-                "[System instruction]: You are a local developer assistant with direct access to the system. "
-                "You can execute system actions by calling the tools listed below. "
-                "Whenever the user asks you to write files, create/list directories, run commands, or inspect the system, "
-                "you MUST immediately execute the corresponding tool calls. "
-                "Do NOT explain how the user can do it themselves; instead, execute the appropriate tool calls directly. "
-                "To call a tool, respond with a JSON block in a code block:\n"
-                '```tool_call\n{"name": "func_name", "arguments": {...}}\n```\n'
-                "Ensure you close the code block with ```. Only use tool_call blocks when needed.\n\n"
-                f"Available tools:\n{json.dumps(tool_defs, indent=2)}"
-            )
+    if global_sys:
+        parts.append(f"[System instruction]: {global_sys}")
+        
+    # Build list of normal conversation message blocks
+    conv_parts = []
     for msg in messages:
         role = msg.get("role", "user")
         content = msg.get("content", "")
@@ -1429,8 +1410,9 @@ def messages_to_prompt(messages: list, tools: list = None) -> tuple:
                     if file_url:
                         images.append((file_url, file_mime))
             content = " ".join(text_parts)
+            
         if role == "system":
-            parts.append(f"[System instruction]: {content}")
+            conv_parts.append(f"[System instruction]: {content}")
         elif role == "assistant":
             if msg.get("tool_calls"):
                 tc_strs = []
@@ -1440,13 +1422,46 @@ def messages_to_prompt(messages: list, tools: list = None) -> tuple:
                         f'```tool_call\n{{"name": "{fn.get("name")}", '
                         f'"arguments": {fn.get("arguments", "{}")}}}\n```'
                     )
-                parts.append(f"[Assistant]: {content or ''}\n" + "\n".join(tc_strs))
+                conv_parts.append(f"[Assistant]: {content or ''}\n" + "\n".join(tc_strs))
             else:
-                parts.append(f"[Assistant]: {content}")
+                conv_parts.append(f"[Assistant]: {content}")
         elif role == "tool":
-            parts.append(f"[Tool result for {msg.get('name', '')}]: {content}")
+            conv_parts.append(f"[Tool result for {msg.get('name', '')}]: {content}")
         else:
-            parts.append(content if content else "")
+            conv_parts.append(content if content else "")
+
+    # 2. Append conversation history except the last user message
+    if conv_parts:
+        if len(conv_parts) > 1:
+            parts.extend(conv_parts[:-1])
+
+    # 3. Add tools instructions immediately before the final user query to maximize prompt adherence
+    if tools:
+        tool_defs = []
+        for tool in tools:
+            fn = tool.get("function", tool) if tool.get("type") == "function" else tool
+            tool_defs.append({
+                "name": fn.get("name", tool.get("name", "")),
+                "description": fn.get("description", tool.get("description", "")),
+                "parameters": fn.get("parameters", tool.get("parameters", {})),
+            })
+        if tool_defs:
+            parts.append(
+                "[System instruction]: You are a local developer assistant with direct access to the system. "
+                "You can execute system actions by calling the tools listed below.\n"
+                "Whenever the user asks you to write files, create/list directories, run commands, or inspect the system, "
+                "you MUST immediately execute the corresponding tool calls. Do NOT explain how the user can do it themselves; "
+                "instead, execute the appropriate tool calls directly.\n"
+                "To call a tool, respond with a JSON block in a code block:\n"
+                '```tool_call\n{"name": "func_name", "arguments": {...}}\n```\n'
+                "Ensure you close the code block with ```. Only use tool_call blocks when needed.\n\n"
+                f"Available tools:\n{json.dumps(tool_defs, indent=2)}"
+            )
+
+    # 4. Append the final message of the history
+    if conv_parts:
+        parts.append(conv_parts[-1])
+        
     prompt = "\n\n".join(p for p in parts if p)
     return prompt, images
 
@@ -1454,22 +1469,67 @@ def messages_to_prompt(messages: list, tools: list = None) -> tuple:
 def parse_tool_calls(text: str) -> tuple:
     """Extract tool_call blocks. Returns (clean_text, tool_calls_list)."""
     tool_calls = []
-    pattern = r'```tool_call\s*\n(.*?)\n```'
-    for match in re.findall(pattern, text, re.DOTALL):
+    
+    # 1. Standard pattern: ```tool_call\n{...}\n```
+    pattern_tool = r'```tool_call\s*\n(.*?)\n```'
+    for match in re.findall(pattern_tool, text, re.DOTALL):
         try:
             data = json.loads(match.strip())
-            tool_calls.append({
-                "id": f"call_{uuid.uuid4().hex[:8]}",
-                "type": "function",
-                "function": {
-                    "name": data["name"],
-                    "arguments": json.dumps(data.get("arguments", {}), ensure_ascii=False),
-                },
-            })
-        except (json.JSONDecodeError, KeyError):
+            if "name" in data:
+                tool_calls.append({
+                    "id": f"call_{uuid.uuid4().hex[:8]}",
+                    "type": "function",
+                    "function": {
+                        "name": data["name"],
+                        "arguments": json.dumps(data.get("arguments", {}), ensure_ascii=False),
+                    },
+                })
+        except Exception:
             pass
-    clean = re.sub(pattern, '', text, flags=re.DOTALL).strip()
-    return clean, tool_calls
+            
+    # 2. JSON block pattern: ```json\n{...}\n``` (often generated by models instead of tool_call)
+    pattern_json = r'```json\s*\n(.*?)\n```'
+    for match in re.findall(pattern_json, text, re.DOTALL):
+        try:
+            data = json.loads(match.strip())
+            if isinstance(data, dict) and "name" in data:
+                args = data.get("arguments") or data.get("args") or {}
+                tool_calls.append({
+                    "id": f"call_{uuid.uuid4().hex[:8]}",
+                    "type": "function",
+                    "function": {
+                        "name": data["name"],
+                        "arguments": json.dumps(args, ensure_ascii=False) if isinstance(args, dict) else str(args),
+                    },
+                })
+        except Exception:
+            pass
+
+    # 3. Fallback: Parse any ```bash / ```sh code blocks as command executions if no other tool calls found!
+    if not tool_calls:
+        pattern_bash = r'```(?:bash|sh|shell|zsh)\s*\n(.*?)\n```'
+        for match in re.findall(pattern_bash, text, re.DOTALL):
+            cmd = match.strip()
+            if cmd:
+                tool_calls.append({
+                    "id": f"call_{uuid.uuid4().hex[:8]}",
+                    "type": "function",
+                    "function": {
+                        "name": "execute_command",
+                        "arguments": json.dumps({"command": cmd}, ensure_ascii=False),
+                    },
+                })
+
+    # Clean the output text
+    clean = text
+    clean = re.sub(pattern_tool, '', clean, flags=re.DOTALL)
+    clean = re.sub(pattern_json, '', clean, flags=re.DOTALL)
+    
+    # If we parsed command execution from bash code blocks, we can strip them or leave them as notes
+    if any(tc["function"]["name"] == "execute_command" for tc in tool_calls):
+        clean = re.sub(r'```(?:bash|sh|shell|zsh)\s*\n(.*?)\n```', '', clean, flags=re.DOTALL)
+
+    return clean.strip(), tool_calls
 
 
 def is_command_safe(command: str) -> tuple:
