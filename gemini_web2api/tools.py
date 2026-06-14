@@ -72,9 +72,14 @@ def messages_to_prompt(messages: list, tools: list = None, tool_choice=None) -> 
             constraint = _build_tool_choice_instruction(tool_choice, tool_defs)
             parts.append(
                 "# Tool Use\n\n"
-                "You can call the following tools. Call format:\n"
+                "You are a local developer assistant with direct access to the system. "
+                "You can execute system actions by calling the tools listed below. "
+                "Whenever the user asks you to write files, create/list directories, run commands, or inspect the system, "
+                "you MUST immediately execute the corresponding tool calls. "
+                "Do NOT explain how the user can do it themselves; instead, execute the appropriate tool calls directly. "
+                "Call format:\n"
                 '```tool_call\n{"name": "func_name", "arguments": {...}}\n```\n'
-                "When calling tools, output ONLY the tool_call block(s).\n\n"
+                "Ensure you close the code block with ```. When calling tools, output ONLY the tool_call block(s).\n\n"
                 f"Available tools:\n{json.dumps(tool_defs, indent=2)}"
                 f"{constraint}"
             )
@@ -89,9 +94,44 @@ def messages_to_prompt(messages: list, tools: list = None, tool_choice=None) -> 
                 if c.get("type") in ("text", "input_text"):
                     text_parts.append(c.get("text", ""))
                 elif c.get("type") == "image_url":
-                    text_parts.append("[Note: Image input not supported in this API. Please describe the image in text.]")
+                    img_url = c.get("image_url", {}).get("url", "")
+                    if img_url:
+                        if img_url.startswith("data:"):
+                            try:
+                                header, b64_data = img_url.split(",", 1)
+                                mime = header.split(";")[0].split(":")[1]
+                                data = base64.b64decode(b64_data)
+                                images.append((data, mime))
+                            except Exception as e:
+                                from .gemini import log
+                                log(f"Failed to decode base64 image: {e}")
+                        else:
+                            images.append((img_url, None))
                 elif c.get("type") == "image":
-                    text_parts.append("[Note: Image input not supported in this API. Please describe the image in text.]")
+                    img_data = c.get("image", "")
+                    if img_data:
+                        try:
+                            data = base64.b64decode(img_data)
+                            mime = c.get("mime_type", "image/png")
+                            images.append((data, mime))
+                        except Exception as e:
+                            from .gemini import log
+                            log(f"Failed to decode base64 image: {e}")
+                elif c.get("type") in ("document", "file"):
+                    file_data = c.get("document", {}).get("data", "") or c.get("file", {}).get("data", "")
+                    file_mime = c.get("document", {}).get("mime_type", "application/pdf") or c.get("file", {}).get("mime_type", "application/pdf")
+                    if file_data:
+                        try:
+                            data = base64.b64decode(file_data)
+                            images.append((data, file_mime))
+                        except Exception as e:
+                            from .gemini import log
+                            log(f"Failed to decode base64 file: {e}")
+                elif c.get("type") in ("file_url", "document_url"):
+                    file_url = c.get("file_url", {}).get("url", "") or c.get("document_url", {}).get("url", "")
+                    file_mime = c.get("file_url", {}).get("mime_type") or c.get("document_url", {}).get("mime_type")
+                    if file_url:
+                        images.append((file_url, file_mime))
             content = " ".join(text_parts)
 
         if role == "system":

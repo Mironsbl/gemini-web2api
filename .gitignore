@@ -6,3 +6,23 @@ cookie.json
 .env
 .idea
 .DS_Store
+
+# Logs and debug files
+*.log
+page_*.html
+*.json
+!config.example.json
+!mcp_config.json
+
+# Databases
+*.db
+
+# Screenshots and media
+*.png
+!logo.png
+
+# Subfolders
+app_current_extracted/
+app_unpacked/
+мирон/
+

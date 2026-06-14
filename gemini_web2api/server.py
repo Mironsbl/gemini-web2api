@@ -20,7 +20,7 @@ def _usage(prompt: str, text: str) -> dict:
     return {"prompt_tokens": p, "completion_tokens": c, "total_tokens": p + c}
 
 
-def _upload_images(images: list) -> list:
+def _upload_images(images: list, cookie_override: str = None, auth_user_override: str = None) -> list:
     """Upload images and return list of file references. Returns None if no images."""
     if not images:
         return None
@@ -33,7 +33,7 @@ def _upload_images(images: list) -> list:
                     data = fetch_image_bytes(data)
                     mime = mime or "image/png"
                 if data:
-                    ref = upload_image(data, "image.png", mime or "image/png")
+                    ref = upload_image(data, "image.png", mime or "image/png", cookie_override=cookie_override, auth_user_override=auth_user_override)
                     file_refs.append(ref)
         except Exception as e:
             log(f"Image upload failed: {e}")
@@ -44,12 +44,15 @@ class GeminiHandler(BaseHTTPRequestHandler):
     def log_message(self, fmt, *args):
         log(fmt % args)
 
-    def send_json(self, data, status=200):
+    def send_json(self, data, status=200, headers=None):
         body = json.dumps(data, ensure_ascii=False).encode()
         self.send_response(status)
         self.send_header("Content-Type", "application/json")
         self.send_header("Access-Control-Allow-Origin", "*")
         self.send_header("Content-Length", str(len(body)))
+        if headers:
+            for k, v in headers.items():
+                self.send_header(k, v)
         self.end_headers()
         self.wfile.write(body)
 
@@ -138,6 +141,7 @@ class GeminiHandler(BaseHTTPRequestHandler):
         if req is None:
             self.send_json({"error": {"message": "invalid JSON"}}, 400)
             return
+        thread_id = req.get("thread_id") or req.get("user") or self.headers.get("X-Thread-ID") or self.headers.get("x-thread-id")
         model_name, model_id, think_mode, err, extra_fields = resolve_model(
             req.get("model", CONFIG["default_model"]))
         if err:
@@ -156,8 +160,14 @@ class GeminiHandler(BaseHTTPRequestHandler):
 
         if stream and (not tools or tool_choice == "none"):
             try:
-                self._start_sse()
-                for delta in generate_stream(prompt, model_id, think_mode, _upload_images(images), extra_fields):
+                self.send_response(200)
+                self.send_header("Content-Type", "text/event-stream")
+                self.send_header("Cache-Control", "no-cache")
+                self.send_header("Access-Control-Allow-Origin", "*")
+                if thread_id:
+                    self.send_header("X-Thread-ID", thread_id)
+                self.end_headers()
+                for delta in generate_stream(prompt, model_id, think_mode, _upload_images(images), extra_fields, thread_id=thread_id):
                     chunk = {"id": cid, "object": "chat.completion.chunk", "created": int(time.time()),
                              "model": model_name, "choices": [{"index": 0, "delta": {"content": delta}, "finish_reason": None}]}
                     self.wfile.write(f"data: {json.dumps(chunk, ensure_ascii=False)}\n\n".encode())
@@ -172,7 +182,7 @@ class GeminiHandler(BaseHTTPRequestHandler):
             return
 
         try:
-            text = generate(prompt, model_id, think_mode, _upload_images(images), extra_fields)
+            text = generate(prompt, model_id, think_mode, _upload_images(images), extra_fields, thread_id=thread_id)
         except Exception as e:
             self.send_json({"error": {"message": f"upstream error: {e}"}}, 502)
             return
@@ -186,20 +196,30 @@ class GeminiHandler(BaseHTTPRequestHandler):
         finish = "tool_calls" if tool_calls else "stop"
 
         if stream:
-            self._start_sse()
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream")
+            self.send_header("Cache-Control", "no-cache")
+            self.send_header("Access-Control-Allow-Origin", "*")
+            if thread_id:
+                self.send_header("X-Thread-ID", thread_id)
+            self.end_headers()
             chunk = {"id": cid, "object": "chat.completion.chunk", "created": int(time.time()),
                      "model": model_name, "choices": [{"index": 0, "delta": msg, "finish_reason": finish}]}
             self.wfile.write(f"data: {json.dumps(chunk, ensure_ascii=False)}\n\n".encode())
             self.wfile.write(b"data: [DONE]\n\n")
             self.wfile.flush()
         else:
-            self.send_json({
+            resp_data = {
                 "id": cid, "object": "chat.completion", "created": int(time.time()),
                 "model": model_name,
                 "choices": [{"index": 0, "message": msg, "finish_reason": finish}],
                 "usage": {"prompt_tokens": len(prompt)//4, "completion_tokens": len(text or "")//4,
                           "total_tokens": (len(prompt)+len(text or ""))//4},
-            })
+            }
+            extra_headers = {"X-Thread-ID": thread_id} if thread_id else None
+            if thread_id:
+                resp_data["thread_id"] = thread_id
+            self.send_json(resp_data, headers=extra_headers)
 
     # ─── /v1/responses (Codex CLI) ───────────────────────────────────────────
 
@@ -208,6 +228,7 @@ class GeminiHandler(BaseHTTPRequestHandler):
         if req is None:
             self.send_json({"error": {"message": "invalid JSON"}}, 400)
             return
+        thread_id = req.get("thread_id") or req.get("user") or self.headers.get("X-Thread-ID") or self.headers.get("x-thread-id")
         model_name, model_id, think_mode, err, extra_fields = resolve_model(
             req.get("model", CONFIG["default_model"]))
         if err:
@@ -263,7 +284,7 @@ class GeminiHandler(BaseHTTPRequestHandler):
             return
 
         try:
-            text = generate(prompt, model_id, think_mode, _upload_images(images), extra_fields)
+            text = generate(prompt, model_id, think_mode, _upload_images(images), extra_fields, thread_id=thread_id)
         except Exception as e:
             self.send_json({"error": {"message": f"upstream error: {e}"}}, 502)
             return
@@ -288,6 +309,8 @@ class GeminiHandler(BaseHTTPRequestHandler):
             self.send_header("Content-Type", "text/event-stream")
             self.send_header("Cache-Control", "no-cache")
             self.send_header("Access-Control-Allow-Origin", "*")
+            if thread_id:
+                self.send_header("X-Thread-ID", thread_id)
             self.end_headers()
             ev = {"type": "response.created", "response": {"id": rid, "object": "response", "status": "in_progress", "model": model_name, "output": []}}
             self.wfile.write(f"event: response.created\ndata: {json.dumps(ev)}\n\n".encode())
@@ -301,12 +324,18 @@ class GeminiHandler(BaseHTTPRequestHandler):
                         self.wfile.write(f"event: response.output_text.done\ndata: {json.dumps(ev)}\n\n".encode())
             resp_obj = {"id": rid, "object": "response", "status": "completed", "model": model_name, "output": output,
                         "usage": {"input_tokens": len(prompt)//4, "output_tokens": len(text or "")//4, "total_tokens": (len(prompt)+len(text or ""))//4}}
+            if thread_id:
+                resp_obj["thread_id"] = thread_id
             self.wfile.write(f"event: response.completed\ndata: {json.dumps({'type': 'response.completed', 'response': resp_obj})}\n\n".encode())
             self.wfile.flush()
         else:
-            self.send_json({"id": rid, "object": "response", "created_at": int(time.time()), "status": "completed",
+            resp_data = {"id": rid, "object": "response", "created_at": int(time.time()), "status": "completed",
                             "model": model_name, "output": output,
-                            "usage": {"input_tokens": len(prompt)//4, "output_tokens": len(text or "")//4, "total_tokens": (len(prompt)+len(text or ""))//4}})
+                            "usage": {"input_tokens": len(prompt)//4, "output_tokens": len(text or "")//4, "total_tokens": (len(prompt)+len(text or ""))//4}}
+            extra_headers = {"X-Thread-ID": thread_id} if thread_id else None
+            if thread_id:
+                resp_data["thread_id"] = thread_id
+            self.send_json(resp_data, headers=extra_headers)
 
     # ─── /v1beta/models (Google Gemini CLI) ──────────────────────────────────
 
