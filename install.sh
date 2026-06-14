@@ -139,6 +139,8 @@ cat << EOF > ~/.local/bin/gemini-official
 #!/bin/bash
 export GOOGLE_GEMINI_BASE_URL="http://localhost:8081"
 export GEMINI_API_KEY="sk-test-key"
+export NO_PROXY="localhost,127.0.0.1,\$NO_PROXY"
+export no_proxy="localhost,127.0.0.1,\$no_proxy"
 exec npx -y @google/gemini-cli "\$@"
 EOF
 chmod +x ~/.local/bin/gemini-official
